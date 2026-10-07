@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+env/
+ENV/
+
+# Scratch & Test
+scratch_test_bottom/
+.tempmediaStorage/
+*.log
+
+# Large binary datasets (optional: comment out if pushing images to GitHub LFS)
+# downloaded_jackets/
+
+# OS specific
+.DS_Store
+Thumbs.db
+desktop.ini
