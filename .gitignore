@@ -19,6 +19,7 @@ chrome_debug_profile/
 
 # Large binary datasets
 downloaded_jackets/
+thumbnails/
 
 # OS specific
 .DS_Store

@@ -99,13 +99,23 @@ def verify_candidates(folder_path, candidate_fnames):
 def run():
     folders = sorted(glob.glob(os.path.join(DOWNLOAD_DIR, "*")))
     cache = {}
-    total_jackets = 0
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            print(f"[*] Loaded {len(cache)} folders from existing cache.")
+        except Exception:
+            cache = {}
 
-    for fld in folders:
+    missing_folders = [f for f in folders if os.path.basename(f) not in cache]
+    print(f"[*] Missing folders to detect: {len(missing_folders)}")
+
+    for fld in missing_folders:
         fld_name = os.path.basename(fld)
         jpgs = sorted(glob.glob(os.path.join(fld, "photo_*.jpg")))
         if not jpgs: continue
 
+        print(f"[*] Scanning {fld_name} ({len(jpgs)} photos)...", flush=True)
         if len(jpgs) <= 18:
             confirmed = ["photo_002.jpg"] if any(os.path.basename(j) == "photo_002.jpg" for j in jpgs) else [os.path.basename(jpgs[0])]
         else:
@@ -115,14 +125,14 @@ def run():
             confirmed = verify_candidates(fld, candidates)
 
         cache[fld_name] = confirmed
-        total_jackets += len(confirmed)
-        print(f"[{fld_name}] {len(jpgs)} photos -> {len(confirmed)} jackets: {confirmed[:4]}...", flush=True)
+        print(f"  [✓] {fld_name} -> {len(confirmed)} jackets found: {confirmed[:5]}...", flush=True)
 
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
 
+    total_jackets = sum(len(v) for v in cache.values())
     print(f"\n==========================================")
-    print(f"Total jackets across all folders: {total_jackets}")
+    print(f"Total jackets across all {len(cache)} folders: {total_jackets}")
 
 if __name__ == "__main__":
     run()
