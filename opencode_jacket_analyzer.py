@@ -26,7 +26,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "opencode_config.json")
 
 # OpenCode Go 기본 설정
 DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
-DEFAULT_MODEL = "qwen2.5-vl-72b-instruct"
+DEFAULT_MODEL = "deepseek-4.1-flash"
 
 SYSTEM_PROMPT = """당신은 빈티지 및 아메카지 가죽자켓 전문 분석가입니다.
 제공된 이미지(손글씨 실측표 및 자켓/라벨 사진)를 정밀하게 분석하여 아래 JSON 포맷으로만 응답하세요.
@@ -55,21 +55,22 @@ SYSTEM_PROMPT = """당신은 빈티지 및 아메카지 가죽자켓 전문 분�
   "style": "..."
 }"""
 
-def load_api_key():
-    # 1. 환경변수 확인
-    key = os.environ.get("OPENCODE_API_KEY", "")
-    if key:
-        return key
-    
-    # 2. config 파일 확인
+def load_config():
+    cfg = {
+        "api_key": os.environ.get("OPENCODE_API_KEY", ""),
+        "base_url": os.environ.get("OPENCODE_BASE_URL", DEFAULT_BASE_URL),
+        "model": os.environ.get("OPENCODE_MODEL", DEFAULT_MODEL)
+    }
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                return cfg.get("api_key", "")
+                user_cfg = json.load(f)
+                if user_cfg.get("api_key"): cfg["api_key"] = user_cfg["api_key"]
+                if user_cfg.get("base_url"): cfg["base_url"] = user_cfg["base_url"]
+                if user_cfg.get("model"): cfg["model"] = user_cfg["model"]
         except Exception:
             pass
-    return ""
+    return cfg
 
 def encode_image_to_base64(image_path, max_dim=1024):
     """이미지 리사이즈 후 Base64 인코딩 (전송 속도 최적화 및 토큰 절약)"""
@@ -192,11 +193,11 @@ def analyze_all_jackets(api_key, base_url=DEFAULT_BASE_URL, model=DEFAULT_MODEL)
         print(f"  - CSV:   {OUTPUT_CSV}")
 
 if __name__ == "__main__":
+    cfg = load_config()
     parser = argparse.ArgumentParser(description="OpenCode Go 가죽자켓 브랜드 판독기")
-    parser.add_argument("--api-key", default="", help="OpenCode Go API Key")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenCode Go Base URL")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model name (e.g. qwen2.5-vl-72b-instruct)")
+    parser.add_argument("--api-key", default=cfg["api_key"], help="OpenCode Go API Key")
+    parser.add_argument("--base-url", default=cfg["base_url"], help="OpenCode Go Base URL")
+    parser.add_argument("--model", default=cfg["model"], help="Model name (기본: deepseek-4.1-flash)")
     args = parser.parse_args()
 
-    key = args.api_key or load_api_key()
-    analyze_all_jackets(key, args.base_url, args.model)
+    analyze_all_jackets(args.api_key, args.base_url, args.model)
