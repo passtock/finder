@@ -112,23 +112,27 @@ def analyze_jacket_with_deepseek(api_key, folder_name):
     if not size_card_path:
         size_card_path = jpgs[0]
 
-    # 라벨 사진 후보: photo_005 ~ photo_012 사이에서 한 장 선택
+    # 전체 자켓 사진 및 라벨 사진 후보 선택
+    jacket_path = jpgs[2] if len(jpgs) > 2 else jpgs[-1]
+    
     label_path = None
     for j in jpgs[3:12]:
-        label_path = j
-        break
-    if not label_path:
+        if j != jacket_path and j != size_card_path:
+            label_path = j
+            break
+    if not label_path and len(jpgs) > 1:
         label_path = jpgs[-1]
 
     card_b64 = encode_image(size_card_path)
-    label_b64 = encode_image(label_path)
+    jacket_b64 = encode_image(jacket_path) if jacket_path != size_card_path else None
+    label_b64 = encode_image(label_path) if label_path and label_path != size_card_path else None
 
     prompt = (
-        "두 장의 사진은 동일한 빈티지 가죽자켓의 손글씨 실측표 카드(사진1)와 라벨/자켓(사진2)입니다.\n"
+        "제공된 사진들은 동일한 빈티지 가죽자켓의 손글씨 실측표 카드, 전체 자켓 사진, 라벨/세부 사진입니다.\n"
         "다른 설명 없이 아래 JSON 포맷으로만 응답해주세요:\n"
         "```json\n"
         "{\n"
-        '  "jacket_code": "실측지 상단 编号 (예: E1, Q118, 91 등)",\n'
+        '  "jacket_code": "실측지 상단 编号 (예: E1, Q118, V80 등)",\n'
         '  "brand": "판독된 브랜드명 영문/한글 (미상일 경우 빈티지 오리지널)",\n'
         '  "leather_type": "가죽 종류 (양가죽, 소가죽, 염소가죽, 스웨이드 등)",\n'
         '  "origin": "원산지/제조국 (미국, 이탈리아, 일본, 한국 등, 불명 시 불명)",\n'
@@ -147,10 +151,11 @@ def analyze_jacket_with_deepseek(api_key, folder_name):
         "x-opencode-session": f"ses_taobao_{uuid.uuid4().hex[:12]}"
     }
 
-    content_list = [
-        {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{card_b64}"}}
-    ]
+    content_list = [{"type": "text", "text": prompt}]
+    if card_b64:
+        content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{card_b64}"}})
+    if jacket_b64:
+        content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jacket_b64}"}})
     if label_b64:
         content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{label_b64}"}})
 
@@ -195,16 +200,35 @@ def main():
         print("[!] 파인만 에이전트 auth.json 또는 OPENCODE_API_KEY를 찾을 수 없습니다.")
         return
 
+    # 기존 결과 로드
+    existing_results = []
+    analyzed_folders = set()
+    if os.path.exists(OUTPUT_CSV):
+        try:
+            prev_df = pd.read_csv(OUTPUT_CSV, encoding="utf-8-sig")
+            existing_results = prev_df.to_dict('records')
+            analyzed_folders = {str(r.get("상품폴더")) for r in existing_results}
+        except Exception:
+            existing_results = []
+
+    # 전체 다운로드 폴더 자동 검색
+    all_folders = [d for d in os.listdir(DOWNLOAD_DIR) if os.path.isdir(os.path.join(DOWNLOAD_DIR, d)) and d.startswith("item_")]
+    # 생성 순서 또는 번호 순서 정렬
+    all_folders.sort(key=lambda d: os.path.getmtime(os.path.join(DOWNLOAD_DIR, d)))
+
+    pending_folders = [f for f in all_folders if f not in analyzed_folders]
+
     print("=" * 65)
-    print("🧥 [OpenCode Go x DeepSeek 4.1 Flash] 가죽자켓 브랜드 판독 시작")
+    print("🧥 [OpenCode Go x DeepSeek 4.1 Flash] 가죽자켓 브랜드 & 실측 자동 판독기")
     print(f"• 모델: {DEFAULT_MODEL}")
-    print(f"• 연동 API: 파인만 에이전트 OpenCode Go 키 (성공)")
-    print(f"• 대상: 완료된 12개 품목 (총 2,602장 사진)")
+    print(f"• 기존 판독 완료: {len(existing_results)}개 품목")
+    print(f"• 신규 판독 대상: {len(pending_folders)}개 품목 (전체 폴더 {len(all_folders)}개)")
     print("=" * 65 + "\n")
 
-    results = []
-    for idx, folder in enumerate(TARGET_FOLDERS, 1):
-        print(f"[{idx:02d}/{len(TARGET_FOLDERS)}] {folder} 분석 중...")
+    results = list(existing_results)
+
+    for idx, folder in enumerate(pending_folders, len(results) + 1):
+        print(f"[{idx:02d}/{len(all_folders)}] {folder} 분석 중...")
         res = analyze_jacket_with_deepseek(api_key, folder)
         if res:
             code = res.get("jacket_code", "-")
@@ -217,7 +241,7 @@ def main():
             sl = res.get("sleeve_cm", "-")
             print(f"  [✓] 품번: {code} | 브랜드: {brand} | 소재: {leather} | 어깨: {sh} | 가슴: {ch} | 기장: {ln}")
             results.append({
-                "순번": idx,
+                "순번": len(results) + 1,
                 "상품폴더": folder,
                 "자켓품번": code,
                 "판독브랜드": brand,
@@ -231,6 +255,11 @@ def main():
                 "총사진수": res.get("total_photos", 0),
                 "상품명": res.get("title", folder)
             })
+
+            # 실시간 중간 저장
+            df = pd.DataFrame(results)
+            df.to_excel(OUTPUT_EXCEL, index=False)
+            df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
         else:
             print(f"  [-] {folder} 분석 건너뜀")
 

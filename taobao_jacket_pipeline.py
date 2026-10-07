@@ -19,8 +19,8 @@ RESULT_CSV = os.path.join(BASE_DIR, "taobao_leather_jackets_summary.csv")
 RESULT_EXCEL = os.path.join(BASE_DIR, "taobao_leather_jackets_summary.xlsx")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 상점 메인 URL
-SHOP_URL = "https://shop193475709.world.taobao.com/?spm=a21xtw.29978518.0.0"
+# 상점 카탈로그 URL
+SHOP_URL = "https://shop193475709.taobao.com/category.htm"
 
 def connect_to_browser():
     chrome_options = Options()
@@ -30,12 +30,12 @@ def connect_to_browser():
 def is_strictly_mens_longsleeve_jacket(title):
     """
     엄격한 필터 조건:
-    1. 가죽 자켓만 (조끼/바지/치마/코트 제외)
+    1. 가죽 자켓만 (조끼/바지/치마/코트/청자켓/인조PU 제외)
     2. 긴팔만 (민소매/반팔/조끼 제외)
     3. 남성 전용 (여성 전용 제외)
     """
     # 여성 전용 제외
-    if any(k in title for k in ["女款", "女士", "女装", "短裙", "半身裙", "女西装"]):
+    if any(k in title for k in ["女款", "女士", "女装", "短裙", "半身裙", "女西装", "女式"]):
         return False, "여성 전용 상품 제외"
     if "女" in title and "男" not in title:
         return False, "여성 표기 상품 제외"
@@ -48,6 +48,10 @@ def is_strictly_mens_longsleeve_jacket(title):
     if any(k in title for k in ["大衣", "风衣", "长款", "皮裤", "裤子", "短裤"]):
         return False, "코트/바지 형태 제외"
 
+    # 인조가죽(PU) 및 데님(청자켓) 제외
+    if any(k in title for k in ["PU", "牛仔"]):
+        return False, "PU/데님 제외"
+
     # 필수 가죽자켓 키워드
     jacket_keywords = ["皮衣", "皮夹克", "夹克", "机车", "飞行员", "A2", "G1", "西服", "西装", "外套"]
     if not any(k in title for k in jacket_keywords):
@@ -57,40 +61,56 @@ def is_strictly_mens_longsleeve_jacket(title):
 
 def setup_shop_catalog(driver):
     """
-    상점 홈 접속 -> 왼쪽 메뉴 '男装真皮外套' 클릭 -> 상단 '价格' 순 정렬 클릭 -> 전체 상품(60개) 스크롤 로딩
+    상점 카탈로그 진입 -> '男装真皮外套' 카테고리 클릭 -> '价格' 가격순 정렬 클릭 -> 전체 상품 카드 스크롤 로딩
     """
-    print(f"[*] 상점 메인 페이지 접속: {SHOP_URL}", flush=True)
-    driver.get(SHOP_URL)
-    time.sleep(3)
+    curr = driver.current_url
+    if "shop193475709" not in curr or ("category.htm" not in curr and "search.htm" not in curr):
+        print(f"[*] 상점 카탈로그 페이지 접속: {SHOP_URL}", flush=True)
+        driver.get(SHOP_URL)
+        time.sleep(3)
 
     # 1. 왼쪽 카테고리 메뉴에서 '男装真皮外套' 클릭
     print("    - 왼쪽 카테고리 메뉴에서 '男装真皮外套' 선택 중...", flush=True)
     driver.execute_script("""
-        let spans = Array.from(document.querySelectorAll('span'));
-        let target = spans.find(s => s.innerText.trim() === '男装真皮外套');
-        if (target) target.click();
+        let spans = Array.from(document.querySelectorAll('span, a'));
+        let target = spans.find(s => s.innerText && s.innerText.trim() === '男装真皮外套');
+        if (target) {
+            let clickTarget = target.closest('li') || target.closest('div') || target;
+            clickTarget.click();
+        }
     """)
     time.sleep(2)
 
     # 2. 상단 정렬 탭에서 '价格' (가격순) 클릭
     print("    - 상단 정렬에서 '价格' (가격순 정렬) 버튼 클릭 중...", flush=True)
     driver.execute_script("""
-        let spans = Array.from(document.querySelectorAll('span'));
-        let priceBtn = spans.find(s => s.innerText.trim() === '价格');
-        if (priceBtn) (priceBtn.parentElement || priceBtn).click();
+        let spans = Array.from(document.querySelectorAll('span, a, div'));
+        let priceBtn = spans.find(s => s.innerText && s.innerText.trim() === '价格' && s.children.length <= 1);
+        if (priceBtn) {
+            let clickTarget = priceBtn.closest('li') || priceBtn.closest('div') || priceBtn;
+            clickTarget.click();
+        }
     """)
     time.sleep(2)
 
-    # 3. 카탈로그 전체 카드(총 60개) 점진적 스크롤 로딩
+    # 3. 카탈로그 전체 카드 점진적 스크롤 로딩
     print("    - 카탈로그 페이지 점진적 스크롤하여 전체 상품 카드 로딩 중...", flush=True)
-    for y in range(0, 8000, 800):
+    prev_count = 0
+    stable_count = 0
+    for y in range(0, 15000, 1000):
         driver.execute_script(f"window.scrollTo(0, {y});")
-        time.sleep(0.8)
+        time.sleep(0.6)
         cards = driver.find_elements(By.CSS_SELECTOR, "[class*='cardContainer']")
-        print(f"      [카탈로그 스크롤] Y={y}px: 로드된 상품 카드 {len(cards)}개...", flush=True)
-        if len(cards) >= 60:
-            print(f"    - [카탈로그 로딩 완료] 전체 {len(cards)}개의 모든 상품 카드 로딩 성공!", flush=True)
-            break
+        curr_count = len(cards)
+        print(f"      [카탈로그 스크롤] Y={y}px: 로드된 상품 카드 {curr_count}개...", flush=True)
+        if curr_count == prev_count and curr_count > 0:
+            stable_count += 1
+            if stable_count >= 3:
+                print(f"    - [카탈로그 로딩 완료] 최종 {curr_count}개의 모든 상품 카드 로딩 성공!", flush=True)
+                break
+        else:
+            stable_count = 0
+            prev_count = curr_count
 
     # 맨 위로 스크롤 복귀
     driver.execute_script("window.scrollTo(0, 0);")
@@ -318,6 +338,15 @@ def run_pipeline():
 
         handles_after = list(driver.window_handles)
         new_handles = [h for h in handles_after if h not in handles_before]
+        if not new_handles:
+            try:
+                driver.execute_script("arguments[0].click();", title_el)
+                time.sleep(3)
+                handles_after = list(driver.window_handles)
+                new_handles = [h for h in handles_after if h not in handles_before]
+            except Exception:
+                pass
+
         if not new_handles:
             print("[-] 새 탭이 열리지 않았습니다. 건너뜁니다.", flush=True)
             continue
