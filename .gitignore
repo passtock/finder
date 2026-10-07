@@ -12,6 +12,7 @@ ENV/
 # Scratch & Test
 scratch_test_bottom/
 .tempmediaStorage/
+chrome_debug_profile/
 *.log
 
 # Large binary datasets (optional: comment out if pushing images to GitHub LFS)
