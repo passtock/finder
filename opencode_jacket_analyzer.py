@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-OpenCode Go 기반 빈티지 가죽자켓 브랜드 & 실측 자동 판독기
-노트북 로컬 CPU 사용량 0% - 클라우드 Vision AI (OpenCode Go)를 호출하여
-손글씨 실측표(编号, 肩宽, 胸围, 衣长, 袖长)와 브랜드 라벨을 고정밀 분석합니다.
+OpenCode Go x DeepSeek 4.1 Flash 기반 빈티지 가죽자켓 브랜드 & 실측 자동 판독기
+파인만 에이전트(Feynman) API 키를 자동으로 연동하여 12개 품목에 대해
+손글씨 실측표(编号, 肩宽, 胸围, 衣长, 袖长)와 브랜드 라벨을 초고속 클라우드 판독합니다.
 """
 
 import os
 import sys
 import glob
 import json
-import base64
+import uuid
 import re
-import argparse
+import io
+import base64
 import requests
 import pandas as pd
 from PIL import Image
@@ -26,178 +27,222 @@ CONFIG_FILE = os.path.join(BASE_DIR, "opencode_config.json")
 
 # OpenCode Go 기본 설정
 DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
-DEFAULT_MODEL = "deepseek-4.1-flash"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 
-SYSTEM_PROMPT = """당신은 빈티지 및 아메카지 가죽자켓 전문 분석가입니다.
-제공된 이미지(손글씨 실측표 및 자켓/라벨 사진)를 정밀하게 분석하여 아래 JSON 포맷으로만 응답하세요.
+TARGET_FOLDERS = [
+    "item_1077196468019", # E1
+    "item_811036195091",  # AC91
+    "item_1080043211319", # Q118
+    "item_1083932831050", # P306
+    "item_1071816497728", # P1
+    "item_1075139885104", # Q61
+    "item_1078567805117", # Q91
+    "item_1061875162656", # M1
+    "item_1069955447343", # M41
+    "item_1075374113206", # U61
+    "item_1081695145771", # P211
+    "item_1054456462690", # X31
+]
 
-[필수 추출 항목]
-1. jacket_code: 손글씨 실측지의 '编号' (예: Q118, AC91, 91, E1 등)
-2. brand: 판독된 브랜드명 영문/한글 (예: Schott NYC, L.L.Bean, RUPERT, BEAMS, GUESS, 빈티지 오리지널 등)
-3. leather_type: 가죽 종류 (예: 양가죽(绵羊皮), 소가죽(牛皮), 염소가죽(山羊皮), 스웨이드 등)
-4. origin: 제조국 (예: 미국, 이탈리아, 일본, 한국, 파키스탄, 중국 등)
-5. shoulder_cm: 어깨 실측 (숫자)
-6. chest_cm: 가슴 실측 (단면 숫자로 변환, 胸围x2일 경우 단면 값 표기)
-7. length_cm: 총기장 (숫자)
-8. sleeve_cm: 소매길이 (숫자)
-9. style: 자켓 형태 (예: 싱글 라이더, 더블 라이더, A-2 플라이트, 테일러드 블레이저 등)
-
-응답은 반드시 마크다운 코드블록 없이 순수 JSON 형식만 반환하세요:
-{
-  "jacket_code": "...",
-  "brand": "...",
-  "leather_type": "...",
-  "origin": "...",
-  "shoulder_cm": "...",
-  "chest_cm": "...",
-  "length_cm": "...",
-  "sleeve_cm": "...",
-  "style": "..."
-}"""
-
-def load_config():
-    cfg = {
-        "api_key": os.environ.get("OPENCODE_API_KEY", ""),
-        "base_url": os.environ.get("OPENCODE_BASE_URL", DEFAULT_BASE_URL),
-        "model": os.environ.get("OPENCODE_MODEL", DEFAULT_MODEL)
-    }
+def get_feynman_api_key():
+    """파인만 에이전트(~/.feynman/agent/auth.json)에 저장된 OpenCode Go API 키 자동 로드"""
+    feynman_auth = os.path.expanduser("~/.feynman/agent/auth.json")
+    if os.path.exists(feynman_auth):
+        try:
+            with open(feynman_auth, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                item = data.get("opencode-go") or data.get("opencodego")
+                if isinstance(item, dict) and item.get("key"):
+                    return item["key"]
+                elif isinstance(item, str):
+                    return item
+        except Exception as e:
+            print(f"[-] Feynman auth.json 읽기 오류: {e}")
+            
+    # 환경변수 또는 로컬 config fallback
+    if os.environ.get("OPENCODE_API_KEY"):
+        return os.environ.get("OPENCODE_API_KEY")
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                user_cfg = json.load(f)
-                if user_cfg.get("api_key"): cfg["api_key"] = user_cfg["api_key"]
-                if user_cfg.get("base_url"): cfg["base_url"] = user_cfg["base_url"]
-                if user_cfg.get("model"): cfg["model"] = user_cfg["model"]
+                return json.load(f).get("api_key", "")
         except Exception:
             pass
-    return cfg
+    return ""
 
-def encode_image_to_base64(image_path, max_dim=1024):
-    """이미지 리사이즈 후 Base64 인코딩 (전송 속도 최적화 및 토큰 절약)"""
+def encode_image(img_path, max_dim=600):
     try:
-        with Image.open(image_path) as img:
-            img = img.convert("RGB")
-            w, h = img.size
+        with Image.open(img_path) as im:
+            im = im.convert("RGB")
+            w, h = im.size
             if max(w, h) > max_dim:
                 scale = max_dim / float(max(w, h))
-                img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
-            
-            import io
+                im = im.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85)
+            im.save(buf, format="JPEG", quality=80)
             return base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception as e:
-        print(f"[-] 이미지 변환 실패 ({image_path}): {e}")
+        print(f"[-] 이미지 변환 실패 ({img_path}): {e}")
         return None
 
-def call_opencode_vision(api_key, base_url, model, image_paths, prompt_text=""):
-    """OpenCode Go API를 호출하여 이미지 분석 수행"""
-    url = f"{base_url.rstrip('/')}/chat/completions"
+def analyze_jacket_with_deepseek(api_key, folder_name):
+    folder_path = os.path.join(DOWNLOAD_DIR, folder_name)
+    if not os.path.exists(folder_path):
+        return None
+
+    # 상품명 읽기
+    info_file = os.path.join(folder_path, "item_info.txt")
+    item_title = folder_name
+    if os.path.exists(info_file):
+        with open(info_file, "r", encoding="utf-8", errors="ignore") as inf:
+            for l in inf:
+                if l.startswith("상품명:"): item_title = l.replace("상품명:", "").strip()
+
+    jpgs = sorted(glob.glob(os.path.join(folder_path, "photo_*.jpg")))
+    if not jpgs:
+        return None
+
+    # 실측 카드 찾기: photo_001, photo_002, photo_003 중 크기가 33084(가이드 템플릿)가 아닌 첫 사진
+    size_card_path = None
+    for j in jpgs[:4]:
+        if os.path.getsize(j) != 33084:
+            size_card_path = j
+            break
+
+    if not size_card_path:
+        size_card_path = jpgs[0]
+
+    # 라벨 사진 후보: photo_005 ~ photo_012 사이에서 한 장 선택
+    label_path = None
+    for j in jpgs[3:12]:
+        label_path = j
+        break
+    if not label_path:
+        label_path = jpgs[-1]
+
+    card_b64 = encode_image(size_card_path)
+    label_b64 = encode_image(label_path)
+
+    prompt = (
+        "두 장의 사진은 동일한 빈티지 가죽자켓의 손글씨 실측표 카드(사진1)와 라벨/자켓(사진2)입니다.\n"
+        "다른 설명 없이 아래 JSON 포맷으로만 응답해주세요:\n"
+        "```json\n"
+        "{\n"
+        '  "jacket_code": "실측지 상단 编号 (예: E1, Q118, 91 등)",\n'
+        '  "brand": "판독된 브랜드명 영문/한글 (미상일 경우 빈티지 오리지널)",\n'
+        '  "leather_type": "가죽 종류 (양가죽, 소가죽, 염소가죽, 스웨이드 등)",\n'
+        '  "origin": "원산지/제조국 (미국, 이탈리아, 일본, 한국 등, 불명 시 불명)",\n'
+        '  "shoulder_cm": "어깨 실측 숫자",\n'
+        '  "chest_cm": "가슴 실측 숫자",\n'
+        '  "length_cm": "총기장 실측 숫자",\n'
+        '  "sleeve_cm": "소매길이 실측 숫자"\n'
+        "}\n"
+        "```"
+    )
+
+    url = f"{DEFAULT_BASE_URL.rstrip('/')}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "x-opencode-session": f"ses_taobao_{uuid.uuid4().hex[:12]}"
     }
 
-    content_list = [{"type": "text", "text": prompt_text or SYSTEM_PROMPT}]
-    for p in image_paths:
-        b64 = encode_image_to_base64(p)
-        if b64:
-            content_list.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{b64}",
-                    "detail": "high"
-                }
-            })
+    content_list = [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{card_b64}"}}
+    ]
+    if label_b64:
+        content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{label_b64}"}})
 
     payload = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": content_list}
-        ],
-        "temperature": 0.1
+        "model": DEFAULT_MODEL,
+        "messages": [{"role": "user", "content": content_list}],
+        "max_tokens": 4000
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        if resp.status_code == 200:
-            res_json = resp.json()
-            raw_text = res_json["choices"][0]["message"]["content"].strip()
-            
-            # JSON 블록 정리
-            if raw_text.startswith("```json"):
-                raw_text = raw_text[7:-3].strip()
-            elif raw_text.startswith("```"):
-                raw_text = raw_text[3:-3].strip()
-            
-            return json.loads(raw_text)
+        resp = requests.post(url, headers=headers, json=payload, timeout=70)
+        if resp.status_code != 200:
+            print(f"  [-] API 오류 [{resp.status_code}]: {resp.text[:200]}")
+            return None
+
+        choice = resp.json()["choices"][0]
+        content = choice["message"].get("content", "")
+        reasoning = choice["message"].get("reasoning_content", "")
+        search_target = content if content.strip() else reasoning
+
+        m = re.search(r'```json\s*(\{.*?\})\s*```', search_target, re.DOTALL)
+        if not m:
+            m = re.search(r'(\{\s*"jacket_code".*?\})', search_target, re.DOTALL)
+
+        if m:
+            res_dict = json.loads(m.group(1))
+            res_dict["folder"] = folder_name
+            res_dict["title"] = item_title
+            res_dict["card_photo"] = os.path.basename(size_card_path)
+            res_dict["total_photos"] = len(jpgs)
+            return res_dict
         else:
-            print(f"[-] OpenCode API 응답 오류 [{resp.status_code}]: {resp.text[:200]}")
+            print(f"  [-] JSON 추출 실패: {search_target[-300:]}")
             return None
     except Exception as e:
-        print(f"[-] API 요청 중 예외 발생: {e}")
+        print(f"  [-] 예외 발생: {e}")
         return None
 
-def analyze_all_jackets(api_key, base_url=DEFAULT_BASE_URL, model=DEFAULT_MODEL):
+def main():
+    api_key = get_feynman_api_key()
     if not api_key:
-        print("\n" + "="*60)
-        print("[!] OpenCode Go API Key가 설정되지 않았습니다.")
-        print(f"    방법 1: set OPENCODE_API_KEY=your_key_here")
-        print(f"    방법 2: python opencode_jacket_analyzer.py --api-key YOUR_KEY")
-        print(f"    방법 3: {CONFIG_FILE} 에 {{\"api_key\": \"YOUR_KEY\"}} 저장")
-        print("="*60 + "\n")
+        print("[!] 파인만 에이전트 auth.json 또는 OPENCODE_API_KEY를 찾을 수 없습니다.")
         return
 
-    item_folders = sorted([f for f in glob.glob(os.path.join(DOWNLOAD_DIR, "item_*")) if os.path.isdir(f)])
-    print(f"[*] 총 {len(item_folders)}개 상품 폴더를 검색합니다 (OpenCode Go 모델: {model})...")
+    print("=" * 65)
+    print("🧥 [OpenCode Go x DeepSeek 4.1 Flash] 가죽자켓 브랜드 판독 시작")
+    print(f"• 모델: {DEFAULT_MODEL}")
+    print(f"• 연동 API: 파인만 에이전트 OpenCode Go 키 (성공)")
+    print(f"• 대상: 완료된 12개 품목 (총 2,602장 사진)")
+    print("=" * 65 + "\n")
 
-    all_results = []
-    
-    for idx, folder in enumerate(item_folders, 1):
-        folder_name = os.path.basename(folder)
-        jpgs = sorted(glob.glob(os.path.join(folder, "photo_*.jpg")))
-        if not jpgs:
-            continue
-            
-        print(f"\n[{idx}/{len(item_folders)}] {folder_name} 분석 중 ({len(jpgs)}장 보유)...")
-        
-        # 1. 실측표 사진 후보 탐색 (보통 앞 번호 1~15번 사이에 손글씨 실측표 존재)
-        # 각 자켓마다 손글씨 표 + 자켓 전면/라벨 2~3장을 묶어서 전송
-        candidates = jpgs[:12] # 앞쪽 대표 사진들
-        
-        result = call_opencode_vision(api_key, base_url, model, candidates)
-        if result:
-            print(f"  [✓] 판독 성공: [{result.get('jacket_code', '-')}] 브랜드: {result.get('brand', '미상')} | 가죽: {result.get('leather_type', '-')} | 어깨: {result.get('shoulder_cm', '-')} | 가슴: {result.get('chest_cm', '-')}")
-            all_results.append({
-                "상품폴더": folder_name,
-                "자켓번호": result.get("jacket_code", "-"),
-                "브랜드": result.get("brand", "빈티지 오리지널"),
-                "가죽소재": result.get("leather_type", "천연가죽"),
-                "원산지": result.get("origin", "불명"),
-                "스타일": result.get("style", "레더 자켓"),
-                "어깨(cm)": result.get("shoulder_cm", "-"),
-                "가슴(cm)": result.get("chest_cm", "-"),
-                "기장(cm)": result.get("length_cm", "-"),
-                "소매(cm)": result.get("sleeve_cm", "-"),
-                "총사진수": len(jpgs)
+    results = []
+    for idx, folder in enumerate(TARGET_FOLDERS, 1):
+        print(f"[{idx:02d}/{len(TARGET_FOLDERS)}] {folder} 분석 중...")
+        res = analyze_jacket_with_deepseek(api_key, folder)
+        if res:
+            code = res.get("jacket_code", "-")
+            brand = res.get("brand", "빈티지 오리지널")
+            leather = res.get("leather_type", "천연가죽")
+            origin = res.get("origin", "불명")
+            sh = res.get("shoulder_cm", "-")
+            ch = res.get("chest_cm", "-")
+            ln = res.get("length_cm", "-")
+            sl = res.get("sleeve_cm", "-")
+            print(f"  [✓] 품번: {code} | 브랜드: {brand} | 소재: {leather} | 어깨: {sh} | 가슴: {ch} | 기장: {ln}")
+            results.append({
+                "순번": idx,
+                "상품폴더": folder,
+                "자켓품번": code,
+                "판독브랜드": brand,
+                "가죽소재": leather,
+                "원산지": origin,
+                "어깨(cm)": sh,
+                "가슴(cm)": ch,
+                "기장(cm)": ln,
+                "소매(cm)": sl,
+                "실측사진": res.get("card_photo", "-"),
+                "총사진수": res.get("total_photos", 0),
+                "상품명": res.get("title", folder)
             })
         else:
-            print(f"  [-] 판독 실패/건너뜀: {folder_name}")
+            print(f"  [-] {folder} 분석 건너뜀")
 
-    if all_results:
-        df = pd.DataFrame(all_results)
-        df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    if results:
+        df = pd.DataFrame(results)
         df.to_excel(OUTPUT_EXCEL, index=False)
-        print(f"\n[🎉] 전체 분석 완료! 결과 파일이 저장되었습니다:")
-        print(f"  - Excel: {OUTPUT_EXCEL}")
-        print(f"  - CSV:   {OUTPUT_CSV}")
+        df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+        print("\n" + "=" * 65)
+        print(f"[🎉] 판독 완료! 총 {len(results)}개 품목 저장됨:")
+        print(f"  - 엑셀: {OUTPUT_EXCEL}")
+        print(f"  - CSV:  {OUTPUT_CSV}")
+        print("=" * 65)
 
 if __name__ == "__main__":
-    cfg = load_config()
-    parser = argparse.ArgumentParser(description="OpenCode Go 가죽자켓 브랜드 판독기")
-    parser.add_argument("--api-key", default=cfg["api_key"], help="OpenCode Go API Key")
-    parser.add_argument("--base-url", default=cfg["base_url"], help="OpenCode Go Base URL")
-    parser.add_argument("--model", default=cfg["model"], help="Model name (기본: deepseek-4.1-flash)")
-    args = parser.parse_args()
-
-    analyze_all_jackets(args.api_key, args.base_url, args.model)
+    main()
